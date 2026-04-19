@@ -1146,6 +1146,53 @@ class SlackAdapter(BasePlatformAdapter):
             if thread_context:
                 text = thread_context + text
 
+        # ARLO HALT-SWITCH (bridge-ninja patch): text-level kill command.
+        # "stop"/"halt"/"exit" → set flag, send ack, return (no agent dispatch).
+        # "resume" → clear flag, send ack, return.
+        # If flag exists → block ALL messages (DM + @mention) with "halted" reply.
+        _arlo_halt_flag = os.path.expanduser("~/.hermes/arlo-halted")
+        _arlo_text_norm = (text or "").strip().lower()
+        if _arlo_text_norm in ("stop", "halt", "exit"):
+            try:
+                with open(_arlo_halt_flag, "w") as _f:
+                    _f.write(f"{user_id}\n{time.time()}\n")
+            except Exception as _e:
+                logger.warning("[Slack/arlo-halt] Could not write halt flag: %s", _e)
+            try:
+                await self._get_client(channel_id).chat_postMessage(
+                    channel=channel_id,
+                    text=":octagonal_sign: halted. send `resume` to continue.",
+                    thread_ts=thread_ts,
+                )
+            except Exception as _e:
+                logger.warning("[Slack/arlo-halt] Could not send halt ack: %s", _e)
+            return
+        if _arlo_text_norm == "resume":
+            try:
+                if os.path.exists(_arlo_halt_flag):
+                    os.remove(_arlo_halt_flag)
+            except Exception as _e:
+                logger.warning("[Slack/arlo-halt] Could not remove halt flag: %s", _e)
+            try:
+                await self._get_client(channel_id).chat_postMessage(
+                    channel=channel_id,
+                    text=":white_check_mark: resumed. taking new messages.",
+                    thread_ts=thread_ts,
+                )
+            except Exception as _e:
+                logger.warning("[Slack/arlo-halt] Could not send resume ack: %s", _e)
+            return
+        if os.path.exists(_arlo_halt_flag):
+            try:
+                await self._get_client(channel_id).chat_postMessage(
+                    channel=channel_id,
+                    text=":octagonal_sign: halted. send `resume` to continue.",
+                    thread_ts=thread_ts,
+                )
+            except Exception as _e:
+                logger.warning("[Slack/arlo-halt] Could not send halted reply: %s", _e)
+            return
+
         # Determine message type
         msg_type = MessageType.TEXT
         if text.startswith("/"):
