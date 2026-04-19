@@ -1014,6 +1014,43 @@ class SlackAdapter(BasePlatformAdapter):
         await self._remove_reaction(channel_id, ts, "eyes")
         await self._add_reaction(channel_id, ts, "white_check_mark")
 
+    def _arlo_team_identity(self, slack_user_id: str):
+        """
+        Look up the team.yaml entry for a Slack user_id.
+        Returns (first_name, display_label, rhythm_owner_key) — all three
+        are empty strings on miss. Reads the yaml fresh each call; the file
+        is small (4 rows today) and edits are rare enough that caching
+        would be premature.
+        """
+        import os as _os
+        from pathlib import Path as _Path
+        try:
+            import yaml as _yaml
+        except Exception:
+            logger.debug("[Slack/arlo-home] pyyaml unavailable; skipping team.yaml lookup")
+            return "", "", ""
+        candidates = [
+            _Path.home() / ".hermes" / "skills" / "arlo" / "know-your-team" / "team.yaml",
+            _Path(_os.environ.get("HERMES_HOME", "")) / "skills" / "arlo" / "know-your-team" / "team.yaml"
+                if _os.environ.get("HERMES_HOME") else None,
+        ]
+        for p in candidates:
+            if not p or not p.exists():
+                continue
+            try:
+                data = _yaml.safe_load(p.read_text()) or {}
+            except Exception as e:
+                logger.warning("[Slack/arlo-home] could not parse %s: %s", p, e)
+                continue
+            for row in (data.get("team") or []):
+                if row.get("slack_user_id") == slack_user_id:
+                    name = row.get("name") or ""
+                    full = row.get("full_name") or name
+                    owner = row.get("rhythm_owner_key") or (name.lower() if name else "")
+                    return name, full, owner
+            return "", "", ""  # team.yaml found but user not in roster
+        return "", "", ""
+
     async def _publish_arlo_home(self, user_id: str, client) -> None:
         """
         Publish a per-user Home tab view for Arlo:
@@ -1028,25 +1065,27 @@ class SlackAdapter(BasePlatformAdapter):
             logger.error("[Slack/arlo-home] psycopg unavailable: %s", e)
             return
 
-        # Resolve Slack user -> first name
-        first_name = "there"
-        display = None
-        try:
-            info = await client.users_info(user=user_id)
-            prof = (info.get("user") or {}).get("profile") or {}
-            first = prof.get("first_name") or ""
-            if not first:
-                real = prof.get("real_name") or (info.get("user") or {}).get("real_name") or ""
-                first = real.split()[0] if real else ""
-            first_name = first or "there"
-            display = prof.get("display_name") or prof.get("real_name")
-        except Exception as e:
-            logger.warning("[Slack/arlo-home] users.info failed: %s", e)
-
-        owner_key = (first_name or "").lower()
-        # Rae is stored as 'raegen' in rhythm.commitments.owner
-        if owner_key == "rae":
-            owner_key = "raegen"
+        # Resolve Slack user -> first name + rhythm owner key.
+        # Prefer the authoritative team.yaml mapping; fall back to users.info
+        # for anyone not yet in the roster.
+        first_name, display, owner_key = self._arlo_team_identity(user_id)
+        if not first_name:
+            try:
+                info = await client.users_info(user=user_id)
+                prof = (info.get("user") or {}).get("profile") or {}
+                first = prof.get("first_name") or ""
+                if not first:
+                    real = prof.get("real_name") or (info.get("user") or {}).get("real_name") or ""
+                    first = real.split()[0] if real else ""
+                first_name = first or "there"
+                display = prof.get("display_name") or prof.get("real_name")
+                owner_key = (first_name or "").lower()
+                if owner_key == "rae":
+                    owner_key = "raegen"
+            except Exception as e:
+                logger.warning("[Slack/arlo-home] users.info failed: %s", e)
+                first_name = first_name or "there"
+                owner_key = owner_key or ""
 
         # Pull current week + this owner's Top 3
         week_label = None
