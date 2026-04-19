@@ -1153,6 +1153,20 @@ class SlackAdapter(BasePlatformAdapter):
         _arlo_halt_flag = os.path.expanduser("~/.hermes/arlo-halted")
         _arlo_text_norm = (text or "").strip().lower()
         if _arlo_text_norm in ("stop", "halt", "exit"):
+            # Deny any in-flight sandbox approvals across all sessions so
+            # stuck agent turns unblock immediately and return a deny result
+            # to the loop (which then ends cleanly).
+            try:
+                from tools.approval import _gateway_queues, resolve_gateway_approval, _lock
+                with _lock:
+                    _keys = list(_gateway_queues.keys())
+                _denied = 0
+                for _k in _keys:
+                    _denied += resolve_gateway_approval(_k, "deny", resolve_all=True)
+                if _denied:
+                    logger.info("[Slack/arlo-halt] Denied %d pending approval(s)", _denied)
+            except Exception as _e:
+                logger.warning("[Slack/arlo-halt] Could not deny pending approvals: %s", _e)
             try:
                 with open(_arlo_halt_flag, "w") as _f:
                     _f.write(f"{user_id}\n{time.time()}\n")
