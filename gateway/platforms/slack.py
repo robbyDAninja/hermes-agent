@@ -185,6 +185,20 @@ class SlackAdapter(BasePlatformAdapter):
                 await ack()
                 await self._handle_arlo_write_action(body, action, client)
 
+            # Arlo Home tab — per-user live dashboard. Fires when a user
+            # opens Arlo in the Slack sidebar (home tab only, not messages).
+            @self._app.event("app_home_opened")
+            async def handle_app_home_opened(event, client):
+                if event.get("tab") != "home":
+                    return
+                user_id = event.get("user")
+                if not user_id:
+                    return
+                try:
+                    await self._publish_arlo_home(user_id, client)
+                except Exception as e:
+                    logger.warning("[Slack/arlo-home] publish failed: %s", e, exc_info=True)
+
             # Start Socket Mode handler in background
             self._handler = AsyncSocketModeHandler(self._app, app_token)
             self._socket_mode_task = asyncio.create_task(self._handler.start_async())
@@ -999,6 +1013,175 @@ class SlackAdapter(BasePlatformAdapter):
         # Replace 👀 with ✅ when done
         await self._remove_reaction(channel_id, ts, "eyes")
         await self._add_reaction(channel_id, ts, "white_check_mark")
+
+    async def _publish_arlo_home(self, user_id: str, client) -> None:
+        """
+        Publish a per-user Home tab view for Arlo:
+          - Greeting with first name
+          - Current week header
+          - Top 3 commitments for this owner (live from rhythm.commitments)
+          - Footer hint pointing at Messages tab / things Arlo can do
+        """
+        try:
+            import psycopg
+        except Exception as e:
+            logger.error("[Slack/arlo-home] psycopg unavailable: %s", e)
+            return
+
+        # Resolve Slack user -> first name
+        first_name = "there"
+        display = None
+        try:
+            info = await client.users_info(user=user_id)
+            prof = (info.get("user") or {}).get("profile") or {}
+            first = prof.get("first_name") or ""
+            if not first:
+                real = prof.get("real_name") or (info.get("user") or {}).get("real_name") or ""
+                first = real.split()[0] if real else ""
+            first_name = first or "there"
+            display = prof.get("display_name") or prof.get("real_name")
+        except Exception as e:
+            logger.warning("[Slack/arlo-home] users.info failed: %s", e)
+
+        owner_key = (first_name or "").lower()
+        # Rae is stored as 'raegen' in rhythm.commitments.owner
+        if owner_key == "rae":
+            owner_key = "raegen"
+
+        # Pull current week + this owner's Top 3
+        week_label = None
+        top3_rows = []
+        dsn = os.environ.get("ARLO_SUPABASE_DSN")
+        if dsn:
+            try:
+                with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, week_number, start_date, end_date
+                        FROM rhythm.weeks
+                        WHERE status = 'current'
+                        ORDER BY start_date DESC
+                        LIMIT 1
+                        """
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        week_id, week_number, start_date, end_date = row
+                        week_label = f"*{week_number}* — {start_date} to {end_date}"
+                        cur.execute(
+                            """
+                            SELECT title, priority, status, notes
+                            FROM rhythm.commitments
+                            WHERE week_id = %s
+                              AND lower(owner) = %s
+                              AND priority IS NOT NULL
+                              AND priority BETWEEN 1 AND 3
+                            ORDER BY priority
+                            """,
+                            (week_id, owner_key),
+                        )
+                        top3_rows = cur.fetchall()
+            except Exception as e:
+                logger.warning("[Slack/arlo-home] rhythm query failed: %s", e, exc_info=True)
+
+        # Build blocks
+        blocks = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": f"Hey, {first_name} 👋", "emoji": True},
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "_Arlo — Always Running, Learning, Operating. Bridge Ninja's AI steward._",
+                    }
+                ],
+            },
+            {"type": "divider"},
+        ]
+
+        if week_label:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"📅 {week_label}  ·  Revenue push mode."},
+            })
+        else:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "_No current week on Rhythm right now._"},
+            })
+
+        if top3_rows:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Your Top 3 this week*"},
+            })
+            for (title, priority, status, notes) in top3_rows:
+                status_label = (status or "open").strip()
+                emoji = {
+                    "complete": "✅",
+                    "done":     "✅",
+                    "in_progress": "🟡",
+                    "in-progress": "🟡",
+                    "blocked":  "🛑",
+                    "dropped":  "⚪️",
+                }.get(status_label.lower(), "⚪️")
+                line = f"{emoji}  *{priority}.* {title}\n_{status_label}_"
+                if notes:
+                    note_short = notes if len(notes) <= 180 else notes[:177] + "…"
+                    line += f"\n> {note_short}"
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": line},
+                })
+        else:
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"_No Top 3 found for owner `{owner_key}` this week._\n"
+                        "If that's wrong, ping me and I'll dig in."
+                    ),
+                },
+            })
+
+        blocks.extend([
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        "*What you can ask me:*\n"
+                        "• _What are Rae's top 3?_\n"
+                        "• _What's on the calendar today?_\n"
+                        "• _Fix the typo in that commitment_ (I'll ask before writing)\n"
+                        "• _Who's on the team?_"
+                    ),
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "Switch to *Messages* to DM me. Say `stop` to pause me, `resume` to continue.",
+                    }
+                ],
+            },
+        ])
+
+        try:
+            await client.views_publish(
+                user_id=user_id,
+                view={"type": "home", "blocks": blocks},
+            )
+            logger.info("[Slack/arlo-home] published for %s (%s)", display or user_id, owner_key)
+        except Exception as e:
+            logger.warning("[Slack/arlo-home] views_publish failed: %s", e, exc_info=True)
 
     async def _handle_arlo_write_action(self, body: dict, action: dict, client) -> None:
         """
