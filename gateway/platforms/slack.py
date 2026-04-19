@@ -766,12 +766,14 @@ class SlackAdapter(BasePlatformAdapter):
         else:
             thread_ts = event.get("thread_ts") or ts  # ts fallback for channels
 
-        # In channels, only respond if bot is mentioned OR if this is a
-        # reply in a thread where the bot has an active session.
+        # In channels, only respond if bot is mentioned, this is a reply
+        # in a thread with an active session, or channel is free-response.
         bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
         is_mentioned = bot_uid and f"<@{bot_uid}>" in text
-        
-        if not is_dm and bot_uid and not is_mentioned:
+        free_channels = os.getenv("SLACK_FREE_RESPONSE_CHANNELS", "")
+        free_channel_ids = [c.strip() for c in free_channels.split(",") if c.strip()] if free_channels else []
+
+        if not is_dm and bot_uid and not is_mentioned and channel_id not in free_channel_ids:
             # Check if this is a thread reply (thread_ts exists and differs from ts)
             event_thread_ts = event.get("thread_ts")
             is_thread_reply = event_thread_ts and event_thread_ts != ts
