@@ -426,7 +426,11 @@ class _AnthropicCompletionsAdapter:
         self._is_oauth = is_oauth
 
     def create(self, **kwargs) -> Any:
-        from agent.anthropic_adapter import build_anthropic_kwargs, normalize_anthropic_response
+        from agent.anthropic_adapter import (
+            build_anthropic_kwargs,
+            normalize_anthropic_response,
+            _supports_adaptive_thinking,
+        )
 
         messages = kwargs.get("messages", [])
         model = kwargs.get("model", self._model)
@@ -454,7 +458,9 @@ class _AnthropicCompletionsAdapter:
             tool_choice=normalized_tool_choice,
             is_oauth=self._is_oauth,
         )
-        if temperature is not None:
+        # Opus 4.6+ deprecates explicit temperature (Opus 4.7 returns 400).
+        # Auxiliary calls should defer to the model's default sampling.
+        if temperature is not None and not _supports_adaptive_thinking(model):
             anthropic_kwargs["temperature"] = temperature
 
         response = self._client.messages.create(**anthropic_kwargs)

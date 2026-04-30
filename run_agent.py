@@ -694,7 +694,7 @@ class AIAgent:
         is_claude = "claude" in self.model.lower()
         is_native_anthropic = self.api_mode == "anthropic_messages"
         self._use_prompt_caching = (is_openrouter and is_claude) or is_native_anthropic
-        self._cache_ttl = "5m"  # Default 5-minute TTL (1.25x write cost)
+        self._cache_ttl = os.getenv("HERMES_CACHE_TTL", "5m")  # 5m (1.25x) or 1h (2x) — Bridge Ninja patch
         
         # Iteration budget pressure: warn the LLM as it approaches max_iterations.
         # Warnings are injected into the last tool result JSON (not as separate
