@@ -1727,6 +1727,50 @@ class SlackAdapter(BasePlatformAdapter):
             return "", "", ""
         return m["first_name"], m["full_name"], m["owner_key"]
 
+    def _fetch_all_team_members(self):
+        """Fetch all arlo.team_members rows for the Home tab team directory.
+
+        Returns a list of dicts including a count of populated jsonb dimensions
+        (out of 7) - surfaces data gaps without judging them.
+        """
+        import os as _os
+        try:
+            import psycopg
+        except Exception:
+            return []
+        dsn = _os.environ.get("ARLO_SUPABASE_DSN")
+        if not dsn:
+            return []
+        try:
+            with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT display_name, full_name, rhythm_owner_key, role,
+                           flow_profile, challenge_skill, autonomy_profile,
+                           strengths_profile, relatedness_profile,
+                           feedback_profile, direction_profile
+                      FROM arlo.team_members
+                     ORDER BY display_name
+                    """
+                )
+                rows = cur.fetchall()
+        except Exception as e:
+            logger.warning("[Slack/arlo-home] team list fetch failed: %s", e, exc_info=True)
+            return []
+        out = []
+        for r in rows:
+            dimensions = r[4:11]
+            populated = sum(1 for d in dimensions if isinstance(d, dict) and len(d) > 0)
+            out.append({
+                "first_name": r[0] or "",
+                "full_name": r[1] or r[0] or "",
+                "owner_key": r[2] or "",
+                "role": r[3] or "",
+                "populated_dimensions": populated,
+                "total_dimensions": 7,
+            })
+        return out
+
     async def _publish_arlo_home(self, user_id: str, client) -> None:
         """
         Publish a per-user Home tab view for Arlo:
@@ -1906,6 +1950,38 @@ class SlackAdapter(BasePlatformAdapter):
                     "value": member.get("owner_key") or "",
                 }],
             })
+
+
+        # ===== TEAM DIRECTORY =====
+        # Browse other team members. Coverage badge surfaces data gaps
+        # (how many of 7 dimensions have observations) without judging them.
+        all_members = self._fetch_all_team_members()
+        if all_members:
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Team*"},
+            })
+            for tm in all_members:
+                name = tm["full_name"] or tm["first_name"] or "(unknown)"
+                role = tm["role"]
+                cov = f'{tm["populated_dimensions"]}/{tm["total_dimensions"]} dimensions'
+                line_parts = [f"*{name}*"]
+                if role:
+                    line_parts.append(role)
+                line_parts.append(f"_{cov}_")
+                section_block = {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "  ·  ".join(line_parts)},
+                }
+                if tm["owner_key"]:
+                    section_block["accessory"] = {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "See profile", "emoji": True},
+                        "action_id": "arlo_open_full_profile",
+                        "value": tm["owner_key"],
+                    }
+                blocks.append(section_block)
 
         blocks.extend([
             {"type": "divider"},
