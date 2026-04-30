@@ -230,6 +230,16 @@ class SlackAdapter(BasePlatformAdapter):
                 await ack()
                 await self._handle_arlo_write_action(body, action, client)
 
+            # "See full profile" button on the Home tab → opens a modal
+            # with all individual-tier dimensions from arlo.team_members.
+            @self._app.action("arlo_open_full_profile")
+            async def handle_open_full_profile(ack, body, client):
+                await ack()
+                try:
+                    await self._open_full_profile_modal(body, client)
+                except Exception as e:
+                    logger.warning("[Slack/arlo-home] open_full_profile failed: %s", e, exc_info=True)
+
             # Arlo Home tab — per-user live dashboard. Fires when a user
             # opens Arlo in the Slack sidebar (home tab only, not messages).
             @self._app.event("app_home_opened")
@@ -1658,42 +1668,64 @@ class SlackAdapter(BasePlatformAdapter):
             logger.warning("[Slack] Failed to fetch thread context: %s", e)
             return ""
 
-    def _arlo_team_identity(self, slack_user_id: str):
+    def _fetch_team_member(self, slack_user_id: str):
         """
-        Look up the team.yaml entry for a Slack user_id.
-        Returns (first_name, display_label, rhythm_owner_key) — all three
-        are empty strings on miss. Reads the yaml fresh each call; the file
-        is small (4 rows today) and edits are rare enough that caching
-        would be premature.
+        Fetch the arlo.team_members row for a Slack user_id.
+        Returns a dict with identity + synthesized dimension JSONBs, or None on miss.
+        Replaces the team.yaml-based lookup (2026-04-20); team.yaml retained on disk
+        as a disaster-recovery seed but no longer read at runtime.
         """
         import os as _os
-        from pathlib import Path as _Path
         try:
-            import yaml as _yaml
+            import psycopg
         except Exception:
-            logger.debug("[Slack/arlo-home] pyyaml unavailable; skipping team.yaml lookup")
+            logger.debug("[Slack/arlo-home] psycopg unavailable; team_member lookup skipped")
+            return None
+        dsn = _os.environ.get("ARLO_SUPABASE_DSN")
+        if not dsn:
+            return None
+        try:
+            with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT display_name, full_name, rhythm_owner_key, spelling_note,
+                           strengths_profile, direction_profile,
+                           flow_profile, challenge_skill, autonomy_profile,
+                           relatedness_profile, feedback_profile
+                      FROM arlo.team_members
+                     WHERE slack_user_id = %s
+                    """,
+                    (slack_user_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+            return {
+                "first_name": row[0] or "",
+                "full_name": row[1] or row[0] or "",
+                "owner_key": row[2] or "",
+                "spelling_note": row[3] or "",
+                "strengths_profile": row[4] or {},
+                "direction_profile": row[5] or {},
+                "flow_profile": row[6] or {},
+                "challenge_skill": row[7] or {},
+                "autonomy_profile": row[8] or {},
+                "relatedness_profile": row[9] or {},
+                "feedback_profile": row[10] or {},
+            }
+        except Exception as e:
+            logger.warning("[Slack/arlo-home] team_members fetch failed: %s", e, exc_info=True)
+            return None
+
+    def _arlo_team_identity(self, slack_user_id: str):
+        """
+        Returns (first_name, display_label, rhythm_owner_key) from arlo.team_members.
+        Empty strings on miss. Thin wrapper around _fetch_team_member for back-compat.
+        """
+        m = self._fetch_team_member(slack_user_id)
+        if not m:
             return "", "", ""
-        candidates = [
-            _Path.home() / ".hermes" / "skills" / "arlo" / "know-your-team" / "team.yaml",
-            _Path(_os.environ.get("HERMES_HOME", "")) / "skills" / "arlo" / "know-your-team" / "team.yaml"
-                if _os.environ.get("HERMES_HOME") else None,
-        ]
-        for p in candidates:
-            if not p or not p.exists():
-                continue
-            try:
-                data = _yaml.safe_load(p.read_text()) or {}
-            except Exception as e:
-                logger.warning("[Slack/arlo-home] could not parse %s: %s", p, e)
-                continue
-            for row in (data.get("team") or []):
-                if row.get("slack_user_id") == slack_user_id:
-                    name = row.get("name") or ""
-                    full = row.get("full_name") or name
-                    owner = row.get("rhythm_owner_key") or (name.lower() if name else "")
-                    return name, full, owner
-            return "", "", ""  # team.yaml found but user not in roster
-        return "", "", ""
+        return m["first_name"], m["full_name"], m["owner_key"]
 
     async def _publish_arlo_home(self, user_id: str, client) -> None:
         """
@@ -1709,10 +1741,15 @@ class SlackAdapter(BasePlatformAdapter):
             logger.error("[Slack/arlo-home] psycopg unavailable: %s", e)
             return
 
-        # Resolve Slack user -> first name + rhythm owner key.
-        # Prefer the authoritative team.yaml mapping; fall back to users.info
-        # for anyone not yet in the roster.
-        first_name, display, owner_key = self._arlo_team_identity(user_id)
+        # Resolve Slack user -> identity + profile from arlo.team_members.
+        # Fall back to Slack users.info for anyone not yet in the roster.
+        member = self._fetch_team_member(user_id)
+        if member:
+            first_name = member["first_name"]
+            display = member["full_name"]
+            owner_key = member["owner_key"]
+        else:
+            first_name, display, owner_key = "", "", ""
         if not first_name:
             try:
                 info = await client.users_info(user=user_id)
@@ -1831,6 +1868,45 @@ class SlackAdapter(BasePlatformAdapter):
                 },
             })
 
+        # ===== PROFILE SNAPSHOT =====
+        # What Arlo is learning about this teammate. Pulled from arlo.team_members;
+        # evolves as observations accumulate. Full view in the modal.
+        if member:
+            zone = (member.get("strengths_profile") or {}).get("zone_of_genius")
+            works_best = (member.get("direction_profile") or {}).get("notes")
+            blocks.append({"type": "divider"})
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*What I'm learning about you*"},
+            })
+            if zone or works_best:
+                lines = []
+                if zone:
+                    lines.append(f"*Zone of genius*  ·  {zone}")
+                if works_best:
+                    lines.append(f"*Works best*  ·  {works_best}")
+                blocks.append({
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": "\n".join(lines)}],
+                })
+            else:
+                blocks.append({
+                    "type": "context",
+                    "elements": [{
+                        "type": "mrkdwn",
+                        "text": "_I'm still getting to know you. The more we work together, the better I'll understand how you work._",
+                    }],
+                })
+            blocks.append({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "See full profile", "emoji": True},
+                    "action_id": "arlo_open_full_profile",
+                    "value": member.get("owner_key") or "",
+                }],
+            })
+
         blocks.extend([
             {"type": "divider"},
             {
@@ -1865,6 +1941,104 @@ class SlackAdapter(BasePlatformAdapter):
             logger.info("[Slack/arlo-home] published for %s (%s)", display or user_id, owner_key)
         except Exception as e:
             logger.warning("[Slack/arlo-home] views_publish failed: %s", e, exc_info=True)
+
+    async def _open_full_profile_modal(self, body: dict, client) -> None:
+        """
+        Open a Slack modal showing the full arlo.team_members profile for the
+        user who tapped "See full profile" on the Home tab. Individual tier
+        (7 dimensions) rendered now; relational tier wiring comes later.
+        """
+        user_id = (body.get("user") or {}).get("id") or ""
+        trigger_id = body.get("trigger_id")
+        if not trigger_id:
+            logger.warning("[Slack/arlo-home] no trigger_id on profile action")
+            return
+        member = self._fetch_team_member(user_id)
+        if not member:
+            return
+        first = member.get("first_name") or "Your"
+        title = f"{first}'s Profile"
+        if len(title) > 24:
+            title = title[:24]
+        blocks = self._build_full_profile_blocks(member)
+        try:
+            await client.views_open(
+                trigger_id=trigger_id,
+                view={
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": title, "emoji": True},
+                    "close": {"type": "plain_text", "text": "Close"},
+                    "blocks": blocks,
+                },
+            )
+        except Exception as e:
+            logger.warning("[Slack/arlo-home] full profile modal failed: %s", e, exc_info=True)
+
+    def _build_full_profile_blocks(self, member: dict) -> list:
+        """Build modal blocks showing all 7 individual-tier dimensions for a member."""
+        dimensions = [
+            ("Flow Triggers & Blockers", "flow_profile"),
+            ("Challenge / Skill Calibration", "challenge_skill"),
+            ("Autonomy (how you want to be directed)", "autonomy_profile"),
+            ("Strengths & Zone of Genius", "strengths_profile"),
+            ("Relatedness & Belonging", "relatedness_profile"),
+            ("Feedback Reception", "feedback_profile"),
+            ("Direction Preferences", "direction_profile"),
+        ]
+        first = member.get("first_name") or "You"
+        blocks: list = [
+            {
+                "type": "context",
+                "elements": [{
+                    "type": "mrkdwn",
+                    "text": f"_What I'm learning about {first}, grounded in flow science + team psychology. Editable anytime — just tell me in DM._",
+                }],
+            },
+            {"type": "divider"},
+        ]
+        for label, key in dimensions:
+            data = member.get(key) or {}
+            if data:
+                body_text = self._format_profile_jsonb(data)
+            else:
+                body_text = "_Still learning._"
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*{label}*\n{body_text}"},
+            })
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": "_Relational profile (how you work with each teammate) coming as I observe more._",
+            }],
+        })
+        return blocks
+
+    def _format_profile_jsonb(self, data: dict) -> str:
+        """Pretty-format a profile JSONB dict into Slack mrkdwn bullet lines."""
+        if not data:
+            return "_Empty_"
+        skip_keys = {"source", "last_updated"}
+        lines = []
+        for k, v in data.items():
+            if k in skip_keys:
+                continue
+            pretty_key = k.replace("_", " ").capitalize()
+            if isinstance(v, str):
+                s = v.strip()
+                if s:
+                    lines.append(f"• *{pretty_key}*: {s}")
+            elif isinstance(v, (list, tuple)):
+                if v:
+                    lines.append(f"• *{pretty_key}*: {', '.join(str(x) for x in v)}")
+            elif isinstance(v, dict):
+                if v:
+                    lines.append(f"• *{pretty_key}*: {', '.join(f'{k2}={v2}' for k2, v2 in v.items())}")
+            elif v is not None:
+                lines.append(f"• *{pretty_key}*: {v}")
+        return "\n".join(lines) if lines else "_Empty_"
 
     async def _handle_arlo_write_action(self, body: dict, action: dict, client) -> None:
         """
