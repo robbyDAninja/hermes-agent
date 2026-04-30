@@ -542,6 +542,15 @@ def load_gateway_config() -> GatewayConfig:
                     plat_data["extra"] = extra
                 extra.update(bridged)
 
+            # Slack settings → env vars (env vars take precedence)
+            slack_cfg = yaml_cfg.get("slack", {})
+            if isinstance(slack_cfg, dict):
+                frc = slack_cfg.get("free_response_channels")
+                if frc is not None and not os.getenv("SLACK_FREE_RESPONSE_CHANNELS"):
+                    if isinstance(frc, list):
+                        frc = ",".join(str(v) for v in frc)
+                    os.environ["SLACK_FREE_RESPONSE_CHANNELS"] = str(frc)
+
             # Discord settings → env vars (env vars take precedence)
             discord_cfg = yaml_cfg.get("discord", {})
             if isinstance(discord_cfg, dict):
