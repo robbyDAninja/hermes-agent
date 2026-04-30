@@ -2173,7 +2173,57 @@ class SlackAdapter(BasePlatformAdapter):
                 )
                 row = cur.fetchone()
                 if row is None:
-                    logger.info("[Slack/arlo-write] %s not pending (already resolved?)", pending_id)
+                    # Row exists but is no longer 'pending' — already approved,
+                    # denied, expired, or resolved out-of-band (e.g. cleanup).
+                    # Don't silently swallow the click; tell the user the card
+                    # is stale and update it to a resolved view.
+                    cur.execute(
+                        "SELECT status, resolved_by, resolved_at, summary "
+                        "  FROM arlo.pending_writes WHERE id = %s",
+                        (pending_id,),
+                    )
+                    existing = cur.fetchone()
+                    logger.info(
+                        "[Slack/arlo-write] %s click ignored — row not pending "
+                        "(current status: %s)",
+                        pending_id,
+                        existing[0] if existing else "missing",
+                    )
+                    if existing:
+                        ex_status, ex_by, ex_at, ex_summary = existing
+                        stale_text = (
+                            f":lock: *Already resolved* — this proposal was "
+                            f"`{ex_status}` by `{ex_by or 'system'}` "
+                            f"at {ex_at:%Y-%m-%d %H:%M UTC}. "
+                            f"Your tap had no effect."
+                        )
+                    else:
+                        stale_text = (
+                            ":warning: This proposal no longer exists. "
+                            "Your tap had no effect."
+                        )
+                    try:
+                        if message_ts:
+                            await client.chat_update(
+                                channel=channel_id,
+                                ts=message_ts,
+                                text=stale_text,
+                                blocks=[{
+                                    "type": "section",
+                                    "text": {"type": "mrkdwn", "text": stale_text},
+                                }],
+                            )
+                        else:
+                            await client.chat_postMessage(
+                                channel=channel_id,
+                                thread_ts=thread_ts,
+                                text=stale_text,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "[Slack/arlo-write] stale-card update failed: %s",
+                            e, exc_info=True,
+                        )
                     return
                 summary, row_channel, row_thread = row
 
