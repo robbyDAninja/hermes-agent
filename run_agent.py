@@ -1007,7 +1007,7 @@ class AIAgent:
         self._use_prompt_caching, self._use_native_cache_layout = (
             self._anthropic_prompt_cache_policy()
         )
-        self._cache_ttl = "5m"  # Default 5-minute TTL (1.25x write cost)
+        self._cache_ttl = os.getenv("HERMES_CACHE_TTL", "5m")  # Bridge Ninja: configurable TTL (5m=1.25x, 1h=2x)
         
         # Iteration budget: the LLM is only notified when it actually exhausts
         # the iteration budget (api_call_count >= max_iterations).  At that
