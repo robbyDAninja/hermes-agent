@@ -1745,7 +1745,7 @@ class SlackAdapter(BasePlatformAdapter):
             with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT display_name, full_name, rhythm_owner_key, role,
+                    SELECT slack_user_id, display_name, full_name, rhythm_owner_key, role,
                            flow_profile, challenge_skill, autonomy_profile,
                            strengths_profile, relatedness_profile,
                            feedback_profile, direction_profile
@@ -1759,13 +1759,14 @@ class SlackAdapter(BasePlatformAdapter):
             return []
         out = []
         for r in rows:
-            dimensions = r[4:11]
+            dimensions = r[5:12]
             populated = sum(1 for d in dimensions if isinstance(d, dict) and len(d) > 0)
             out.append({
-                "first_name": r[0] or "",
-                "full_name": r[1] or r[0] or "",
-                "owner_key": r[2] or "",
-                "role": r[3] or "",
+                "slack_user_id": r[0] or "",
+                "first_name": r[1] or "",
+                "full_name": r[2] or r[1] or "",
+                "owner_key": r[3] or "",
+                "role": r[4] or "",
                 "populated_dimensions": populated,
                 "total_dimensions": 7,
             })
@@ -1947,7 +1948,7 @@ class SlackAdapter(BasePlatformAdapter):
                     "type": "button",
                     "text": {"type": "plain_text", "text": "See full profile", "emoji": True},
                     "action_id": "arlo_open_full_profile",
-                    "value": member.get("owner_key") or "",
+                    "value": user_id,
                 }],
             })
 
@@ -1974,12 +1975,12 @@ class SlackAdapter(BasePlatformAdapter):
                     "type": "section",
                     "text": {"type": "mrkdwn", "text": "  ·  ".join(line_parts)},
                 }
-                if tm["owner_key"]:
+                if tm["slack_user_id"]:
                     section_block["accessory"] = {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "See profile", "emoji": True},
                         "action_id": "arlo_open_full_profile",
-                        "value": tm["owner_key"],
+                        "value": tm["slack_user_id"],
                     }
                 blocks.append(section_block)
 
@@ -2021,15 +2022,22 @@ class SlackAdapter(BasePlatformAdapter):
     async def _open_full_profile_modal(self, body: dict, client) -> None:
         """
         Open a Slack modal showing the full arlo.team_members profile for the
-        user who tapped "See full profile" on the Home tab. Individual tier
-        (7 dimensions) rendered now; relational tier wiring comes later.
+        teammate whose row was tapped on the Home tab. The subject id is read
+        from the action payload (body["actions"][0]["value"]) — NOT from
+        body["user"]["id"], which is the viewer. Falls back to the viewer only
+        if the action payload is somehow empty (defensive).
         """
-        user_id = (body.get("user") or {}).get("id") or ""
+        actions = body.get("actions") or []
+        subject_id = ""
+        if actions:
+            subject_id = (actions[0].get("value") or "").strip()
+        if not subject_id:
+            subject_id = (body.get("user") or {}).get("id") or ""
         trigger_id = body.get("trigger_id")
         if not trigger_id:
             logger.warning("[Slack/arlo-home] no trigger_id on profile action")
             return
-        member = self._fetch_team_member(user_id)
+        member = self._fetch_team_member(subject_id)
         if not member:
             return
         first = member.get("first_name") or "Your"
