@@ -1186,65 +1186,14 @@ class SlackAdapter(BasePlatformAdapter):
             if thread_context:
                 text = thread_context + text
 
-        # ARLO HALT-SWITCH (bridge-ninja patch): text-level kill command.
-        # "stop"/"halt"/"exit" → set flag, send ack, return (no agent dispatch).
-        # "resume" → clear flag, send ack, return.
-        # If flag exists → block ALL messages (DM + @mention) with "halted" reply.
-        _arlo_halt_flag = os.path.expanduser("~/.hermes/arlo-halted")
-        _arlo_text_norm = (text or "").strip().lower()
-        if _arlo_text_norm in ("stop", "halt", "exit"):
-            # Deny any in-flight sandbox approvals across all sessions so
-            # stuck agent turns unblock immediately and return a deny result
-            # to the loop (which then ends cleanly).
-            try:
-                from tools.approval import _gateway_queues, resolve_gateway_approval, _lock
-                with _lock:
-                    _keys = list(_gateway_queues.keys())
-                _denied = 0
-                for _k in _keys:
-                    _denied += resolve_gateway_approval(_k, "deny", resolve_all=True)
-                if _denied:
-                    logger.info("[Slack/arlo-halt] Denied %d pending approval(s)", _denied)
-            except Exception as _e:
-                logger.warning("[Slack/arlo-halt] Could not deny pending approvals: %s", _e)
-            try:
-                with open(_arlo_halt_flag, "w") as _f:
-                    _f.write(f"{user_id}\n{time.time()}\n")
-            except Exception as _e:
-                logger.warning("[Slack/arlo-halt] Could not write halt flag: %s", _e)
-            try:
-                await self._get_client(channel_id).chat_postMessage(
-                    channel=channel_id,
-                    text=":octagonal_sign: halted. send `resume` to continue.",
-                    thread_ts=thread_ts,
-                )
-            except Exception as _e:
-                logger.warning("[Slack/arlo-halt] Could not send halt ack: %s", _e)
-            return
-        if _arlo_text_norm == "resume":
-            try:
-                if os.path.exists(_arlo_halt_flag):
-                    os.remove(_arlo_halt_flag)
-            except Exception as _e:
-                logger.warning("[Slack/arlo-halt] Could not remove halt flag: %s", _e)
-            try:
-                await self._get_client(channel_id).chat_postMessage(
-                    channel=channel_id,
-                    text=":white_check_mark: resumed. taking new messages.",
-                    thread_ts=thread_ts,
-                )
-            except Exception as _e:
-                logger.warning("[Slack/arlo-halt] Could not send resume ack: %s", _e)
-            return
-        if os.path.exists(_arlo_halt_flag):
-            try:
-                await self._get_client(channel_id).chat_postMessage(
-                    channel=channel_id,
-                    text=":octagonal_sign: halted. send `resume` to continue.",
-                    thread_ts=thread_ts,
-                )
-            except Exception as _e:
-                logger.warning("[Slack/arlo-halt] Could not send halted reply: %s", _e)
+        # ARLO HALT-SWITCH (bridge-ninja shim): delegates to arlo.slack_halt.
+        # See arlo/slack_halt.py for full logic. Returns (should_dispatch, _).
+        from arlo import slack_halt
+        should_dispatch, _halt_msg = await slack_halt.check(
+            text=text, user_id=user_id, channel_id=channel_id,
+            thread_ts=thread_ts, client=self._get_client(channel_id),
+        )
+        if not should_dispatch:
             return
 
         # Determine message type
