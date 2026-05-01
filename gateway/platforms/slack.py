@@ -1952,6 +1952,22 @@ class SlackAdapter(BasePlatformAdapter):
                 }],
             })
 
+        # ===== 7-DAY COST ROLLUP =====
+        # Daily spend across all sessions, computed from state.db token
+        # counts × hardcoded model prices. Surfaces heavy-spend days at a
+        # glance. ET buckets. Read-only.
+        try:
+            from gateway.slack.home_cost import (
+                compute_daily_cost_rollup,
+                build_cost_rollup_blocks,
+            )
+            import os
+            state_db = os.path.expanduser("~/.hermes/state.db")
+            cost_rows = compute_daily_cost_rollup(state_db)
+            blocks.extend(build_cost_rollup_blocks(cost_rows))
+        except Exception as e:
+            logger.warning("[Slack/arlo-home] cost rollup failed: %s", e, exc_info=True)
+
 
         # ===== TEAM DIRECTORY =====
         # Browse other team members. Coverage badge surfaces data gaps
