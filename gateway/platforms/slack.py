@@ -343,21 +343,11 @@ class SlackAdapter(BasePlatformAdapter):
                     excess = len(self._bot_message_ts) - self._BOT_TS_MAX // 2
                     for old_ts in list(self._bot_message_ts)[:excess]:
                         self._bot_message_ts.discard(old_ts)
-            # ARLO (bridge-ninja patch): clear Slack Assistant "Generating
-            # response..." status as soon as the reply is sent, regardless
-            # of any post-turn work (compression, logging, etc.) that still
-            # has to run inside handle_message. Slack auto-surfaces that
-            # status for bots configured as AI Assistants and it outlives
-            # the reply otherwise.
-            if thread_ts:
-                try:
-                    await self._get_client(chat_id).assistant_threads_setStatus(
-                        channel_id=chat_id,
-                        thread_ts=thread_ts,
-                        status="",
-                    )
-                except Exception as _e:
-                    logger.debug("[Slack] Could not clear assistant status: %s", _e)
+            # ARLO patch #3 — body in arlo/slack_send.py
+            from arlo import slack_send
+            await slack_send.clear_assistant_status(
+                client=self._get_client(chat_id), chat_id=chat_id, thread_ts=thread_ts,
+            )
 
             return SendResult(
                 success=True,

@@ -8,7 +8,7 @@
 
 | # | SHA(s) on bn fork | Subject | Cluster | Status | Removal criterion |
 |---|---|---|---|---|---|
-| 3 | 477d2683f | clear assistant `Generating response...` after each send | status-clear | not-extracted-yet | When Hermes ships post-send hook |
+| 3 | 477d2683f | clear assistant `Generating response...` after each send | status-clear | extracted-as-shim → arlo/slack_send.py | When Hermes ships post-send hook |
 | 4 | af988f203 | block_actions handler for arlo write approvals | block-actions | not-extracted-yet | When Hermes ships pluggable block_actions registry |
 | 11 | 063b0cd0c | arlo-write handler acks stale clicks instead of silent no-op | block-actions (folded with #4) | not-extracted-yet | (same as #4) |
 | 1 | ddbcf40e6 | add arlo halt-switch (stop/halt/exit → flag, resume → clear) | halt | not-extracted-yet | When Hermes ships adapter-level lifecycle hooks |
