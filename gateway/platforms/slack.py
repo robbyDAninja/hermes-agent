@@ -1961,7 +1961,6 @@ class SlackAdapter(BasePlatformAdapter):
                 compute_daily_cost_rollup,
                 build_cost_rollup_blocks,
             )
-            import os
             state_db = os.path.expanduser("~/.hermes/state.db")
             cost_rows = compute_daily_cost_rollup(state_db)
             blocks.extend(build_cost_rollup_blocks(cost_rows))
